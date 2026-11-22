@@ -8,6 +8,8 @@ on:
 
 jobs:
   build:
+    permissions:
+      contents: write
     # GA image with Xcode 27.x (iOS 27 SDK) — required so iOS 27 treats the
     # app as Duo-ready: pre-27-SDK builds run in a compat canvas instead of
     # filling the unfolded inner display.
@@ -45,8 +47,26 @@ jobs:
           APP=$(find derived/Build/Products/Release-iphoneos -maxdepth 1 -name 'DualPlay.app')
           test -n "$APP"
           ditto -c -k --keepParent "$APP" DualPlay-unsigned.app.zip
+          # .ipa for signing services: zip with the bundle under Payload/
+          rm -rf Payload
+          mkdir Payload
+          ditto "$APP" Payload/DualPlay.app
+          ditto -c -k --keepParent Payload DualPlay.ipa
 
       - uses: actions/upload-artifact@v4
         with:
           name: DualPlay-unsigned
           path: DualPlay-unsigned.app.zip
+
+      # Release assets keep exact filenames on download (chat pipelines
+      # content-sniff .ipa files and rename them to .zip).
+      - name: Publish rolling release (latest-ci)
+        env:
+          GH_TOKEN: *** secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh release create latest-ci \
+            --title 'DualPlay — latest CI build (unsigned)' \
+            --notes 'Unsigned arm64 Release .ipa; sign with your cert before installing.' \
+            --prerelease 2>/dev/null || true
+          gh release upload latest-ci DualPlay.ipa --clobber
