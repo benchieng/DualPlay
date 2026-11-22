@@ -56,7 +56,9 @@ final class PlayerModel: ObservableObject, Identifiable {
         if let httpHeaders {
             // Hotlink-protected streams (missav et al.) reject bare AVPlayer
             // requests — replay the browser's Referer/Origin/UA.
-            asset = AVURLAsset(url: url, options: [AVURLAssetHTTPHeaderFieldsKey: httpHeaders])
+            // Constant was removed from the iOS 27 SDK; the runtime still
+            // accepts the legacy raw key for URL-asset HTTP headers.
+            asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": httpHeaders])
         } else {
             asset = AVURLAsset(url: url)
         }
