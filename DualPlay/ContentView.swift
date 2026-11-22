@@ -1,6 +1,5 @@
 import SwiftUI
 import AVFoundation
-import PhotosUI
 import UniformTypeIdentifiers
 
 // MARK: - Player model
@@ -73,59 +72,49 @@ final class PlayerUIView: UIView {
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 }
 
-// MARK: - Photos video transfer (PhotosPicker → playable file URL)
-
-struct PickedVideo: Transferable {
-    let url: URL
-
-    static var transferRepresentation: some TransferRepresentation {
-        FileRepresentation(contentType: .movie) { video in
-            SentTransferredFile(video.url)
-        } importing: { received in
-            let safeName = received.file.lastPathComponent
-                .replacingOccurrences(of: " ", with: "-")
-            let dest = URL.temporaryDirectory.appending(path: safeName)
-            if FileManager.default.fileExists(atPath: dest.path) {
-                try FileManager.default.removeItem(at: dest)
-            }
-            try FileManager.default.copyItem(at: received.file, to: dest)
-            return PickedVideo(url: dest)
-        }
-    }
-}
-
 // MARK: - Content
 
 struct ContentView: View {
     @StateObject private var a = PlayerModel()
     @StateObject private var b = PlayerModel()
 
-    @State private var pickingA: PhotosPickerItem?
-    @State private var pickingB: PhotosPickerItem?
     @State private var playing = false
+    @State private var importA = false
+    @State private var importB = false
+
+    // Duo rule from Apple: outer display reports compact width, inner display
+    // regular. Two branches, no idiom checks.
+    @Environment(\.horizontalSizeClass) private var hSize
+    private var wide: Bool { hSize == .regular }
 
     var body: some View {
         VStack(spacing: 10) {
-            HStack(spacing: 6) {
-                pane(model: a, label: "A", selection: $pickingA, volume: $a.volume)
-                pane(model: b, label: "B", selection: $pickingB, volume: $b.volume)
+            if wide {
+                HStack(spacing: 6) { panes }
+            } else {
+                VStack(spacing: 6) { panes }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             controls
         }
         .padding(8)
-        .background(Color.black.ignoresSafeArea())
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
+        .preferredColorScheme(.dark)
         .onAppear { Audio.configure() }
-        .onChange(of: pickingA) { _, item in Task { await load(item, into: a) } }
-        .onChange(of: pickingB) { _, item in Task { await load(item, into: b) } }
+    }
+
+    @ViewBuilder
+    private var panes: some View {
+        pane(model: a, label: "A", importing: $importA, volume: $a.volume)
+        pane(model: b, label: "B", importing: $importB, volume: $b.volume)
     }
 
     // MARK: Panes
 
     @ViewBuilder
     private func pane(model: PlayerModel, label: String,
-                      selection: Binding<PhotosPickerItem?>,
+                      importing: Binding<Bool>,
                       volume: Binding<Double>) -> some View {
         VStack(spacing: 4) {
             ZStack(alignment: .topLeading) {
@@ -138,25 +127,31 @@ struct ContentView: View {
                     .background(.ultraThinMaterial, in: Capsule())
                     .padding(4)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+
             HStack {
                 Text(model.name)
-                    .font(.caption2)
+                    .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                PhotosPicker(selection: selection, matching: .videos) {
-                    Text("Load").font(.caption.bold())
-                }
-                .buttonStyle(.bordered)
-                .tint(.white.opacity(0.25))
-                .foregroundStyle(.primary)
+                Button("Load") { importing.wrappedValue = true }
+                    .buttonStyle(.bordered)
             }
+
             HStack(spacing: 4) {
                 Image(systemName: "speaker.wave.2.fill")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 Slider(value: volume, in: 0...1)
                     .controlSize(.mini)
+            }
+        }
+        .fileImporter(isPresented: importing,
+                      allowedContentTypes: [.movie, .video],
+                      allowsMultipleSelection: false) { result in
+            if case .success(let urls) = result, let url = urls.first {
+                importVideo(url, into: model)
             }
         }
     }
@@ -193,22 +188,29 @@ struct ContentView: View {
             }
             .buttonBorderShape(.roundedRectangle)
 
-            Text("Both clips play in one app, so iOS mixes the two soundtracks. Each clip loops. Drag the sliders to blend A/B.")
+            Text("Both clips play in one app, so iOS mixes the two soundtracks. Each clip loops. The sliders blend A and B.")
                 .font(.caption2)
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .padding(.bottom, 4)
     }
 
-    // MARK: Loading
+    // MARK: Import (Files app via fileImporter)
 
-    private func load(_ item: PhotosPickerItem?, into model: PlayerModel) async {
-        guard let item,
-              let video = try? await item.loadTransferable(type: PickedVideo.self)
-        else { return }
-        model.load(video.url)
-        playing = true
+    private func importVideo(_ url: URL, into model: PlayerModel) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let ext = url.pathExtension.isEmpty ? "mov" : url.pathExtension
+        let dest = URL.temporaryDirectory
+            .appending(path: "DualPlay-\(UUID().uuidString.prefix(8)).\(ext)")
+        do {
+            try FileManager.default.copyItem(at: url, to: dest)
+            model.load(dest)
+            playing = true
+        } catch {
+            model.name = "Couldn't import: \(error.localizedDescription)"
+        }
     }
 }
 

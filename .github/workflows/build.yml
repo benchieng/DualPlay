@@ -8,9 +8,19 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # GA image with Xcode 27.x (iOS 27 SDK) — required so iOS 27 treats the
+    # app as Duo-ready: pre-27-SDK builds run in a compat canvas instead of
+    # filling the unfolded inner display.
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v4
+
+      - name: Select newest installed Xcode 27.x
+        run: |
+          set -euo pipefail
+          XC=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1)
+          if [ -n "$XC" ]; then echo "using $XC"; sudo xcode-select -s "$XC/Contents/Developer"; fi
+          xcodebuild -version
 
       - name: Install XcodeGen
         run: brew install xcodegen
