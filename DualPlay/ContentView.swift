@@ -14,6 +14,7 @@ final class PlayerModel: ObservableObject, Identifiable {
         didSet { player.volume = Float(volume) }
     }
     @Published var isPlaying = false
+    @Published var fill = false   // false = fit (letterbox), true = fill (crop to pane)
     @Published var currentTime: Double = 0
     @Published var duration: Double = 0
 
@@ -111,15 +112,18 @@ final class PlayerModel: ObservableObject, Identifiable {
 
 struct PlayerLayerView: UIViewRepresentable {
     let player: AVPlayer
+    let fill: Bool
 
     func makeUIView(context: Context) -> PlayerUIView {
         let view = PlayerUIView()
         view.playerLayer.player = player
-        view.playerLayer.videoGravity = .resizeAspect
+        view.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
         return view
     }
 
-    func updateUIView(_ uiView: PlayerUIView, context: Context) {}
+    func updateUIView(_ uiView: PlayerUIView, context: Context) {
+        uiView.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
+    }
 }
 
 final class PlayerUIView: UIView {
@@ -307,26 +311,23 @@ struct ContentView: View {
     @State private var playing = false
     @State private var showWeb = false
 
-    // Duo rule from Apple: outer display reports compact width, inner display
-    // regular in BOTH orientations. So side-by-side only when the pose is
-    // genuinely wide (regular width + compact height = unfolded landscape);
-    // unfolded portrait stacks top/bottom so each pane gets the full width.
-    @Environment(\.horizontalSizeClass) private var hSize
-    @Environment(\.verticalSizeClass) private var vSize
-    private var sideBySide: Bool { hSize == .regular && vSize == .compact }
-
+    // The Duo's size classes are identical in both orientations on the inner
+    // display, so the only honest left/right-vs-top/bottom rule is geometry:
+    // landscape container -> side-by-side, portrait -> stacked.
     var body: some View {
-        VStack(spacing: 8) {
-            if sideBySide {
-                HStack(spacing: 6) { panes }
-            } else {
-                VStack(spacing: 6) { panes }
-            }
+        GeometryReader { geo in
+            VStack(spacing: 8) {
+                if geo.size.width > geo.size.height {
+                    HStack(spacing: 6) { panes }
+                } else {
+                    VStack(spacing: 6) { panes }
+                }
 
-            controls
+                controls
+            }
+            .padding(8)
+            .frame(width: geo.size.width, height: geo.size.height)
         }
-        .padding(8)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color.black)
         .preferredColorScheme(.dark)
         .onAppear { Audio.configure() }
@@ -352,7 +353,7 @@ struct ContentView: View {
                       volume: Binding<Double>) -> some View {
         VStack(spacing: 4) {
             ZStack(alignment: .topLeading) {
-                PlayerLayerView(player: model.player)
+                PlayerLayerView(player: model.player, fill: model.fill)
                     .background(Color(white: 0.08))
                     .clipShape(RoundedRectangle(cornerRadius: 10))
                 Text(label)
@@ -370,6 +371,17 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
+                Button {
+                    model.fill.toggle()
+                } label: {
+                    Image(systemName: model.fill
+                          ? "arrow.down.right.and.arrow.up.left"
+                          : "arrow.up.left.and.arrow.down.right")
+                        .padding(6)
+                        .background(.quaternary, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .help(model.fill ? "Fit video (letterbox)" : "Fill pane (crop)")
                 Button("Load") {
                     let target = model
                     Task { @MainActor in
