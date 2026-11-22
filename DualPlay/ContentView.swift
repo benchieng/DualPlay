@@ -191,7 +191,7 @@ private let probeHookJS = """
 (() => {
   if (window.__dpUrls) return;
   Object.defineProperty(window, '__dpUrls', { value: [], writable: false });
-  const add = u => { try { if (u && /\.(m3u8|mp4|m4v|mpegurl|mpd)(\?|$)/i.test(u) && window.__dpUrls.length < 200) window.__dpUrls.push(u); } catch (e) {} };
+  const add = u => { try { if (u && /\\.(m3u8|mp4|m4v|mpegurl|mpd)(\\?|$)/i.test(u) && window.__dpUrls.length < 200) window.__dpUrls.push(u); } catch (e) {} };
   const of = window.fetch;
   window.fetch = function (input, init) { add(typeof input === 'string' ? input : input && input.url); return of.apply(this, arguments); };
   const os = XMLHttpRequest.prototype.open;
