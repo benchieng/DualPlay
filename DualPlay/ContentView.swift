@@ -13,6 +13,7 @@ final class PlayerModel: ObservableObject, Identifiable {
         didSet { player.volume = Float(volume) }
     }
 
+    private var statusObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
 
     init() {
@@ -35,9 +36,18 @@ final class PlayerModel: ObservableObject, Identifiable {
     }
 
     func load(_ url: URL) {
-        player.replaceCurrentItem(with: AVPlayerItem(url: url))
+        let item = AVPlayerItem(url: url)
+        player.replaceCurrentItem(with: item)
         player.volume = Float(volume)
         name = url.lastPathComponent
+        // Surface unplayable picks instead of failing silently.
+        statusObservation?.invalidate()
+        statusObservation = item.observe(\.status) { [weak self] observed, _ in
+            guard observed.status == .failed, let error = observed.error else { return }
+            DispatchQueue.main.async {
+                self?.name = "Can't play \(url.lastPathComponent) — \(error.localizedDescription)"
+            }
+        }
         player.play()
     }
 
@@ -147,8 +157,11 @@ struct ContentView: View {
                     .controlSize(.mini)
             }
         }
+        // [.item] on purpose: the video/movie filters gray out camera (QuickTime
+        // subtype) and cloud-provider files on many iOS builds, so taps do
+        // nothing. Anything is selectable; AVPlayer reports bad picks in-pane.
         .fileImporter(isPresented: importing,
-                      allowedContentTypes: [.movie, .video],
+                      allowedContentTypes: [.item],
                       allowsMultipleSelection: false) { result in
             if case .success(let urls) = result, let url = urls.first {
                 importVideo(url, into: model)
