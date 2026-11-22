@@ -14,9 +14,16 @@ final class PlayerModel: ObservableObject, Identifiable {
         didSet { player.volume = Float(volume) }
     }
     @Published var isPlaying = false
-    @Published var fill = false   // false = fit (letterbox), true = fill (crop to pane)
     @Published var currentTime: Double = 0
     @Published var duration: Double = 0
+    @Published var fill = false   // false = fit (letterbox), true = fill (crop to pane)
+
+    // Per-pane browser: a pane can browse the web independently of the other.
+    @Published var showWeb = false
+    @Published var webAddress = "https://"
+    @Published var webURL: URL?
+    @Published var webNote = ""
+    let browser = WKHolder()
 
     private var statusObservation: NSKeyValueObservation?
     private var durationObservation: NSKeyValueObservation?
@@ -55,8 +62,6 @@ final class PlayerModel: ObservableObject, Identifiable {
     func load(_ url: URL, httpHeaders: [String: String]? = nil) {
         let asset: AVURLAsset
         if let httpHeaders {
-            // Hotlink-protected streams (missav et al.) reject bare AVPlayer
-            // requests — replay the browser's Referer/Origin/UA.
             // Constant was removed from the iOS 27 SDK; the runtime still
             // accepts the legacy raw key for URL-asset HTTP headers.
             asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": httpHeaders])
@@ -173,27 +178,34 @@ final class FilePickerPresenter: NSObject, UIDocumentPickerDelegate {
     }
 }
 
-// MARK: - Web browser sheet (sniffs <video> sources for streaming)
+// MARK: - Per-pane browser
 
-final class BrowserHolder: ObservableObject {
+final class WKHolder {
     weak var web: WKWebView?
 }
 
 struct WebView: UIViewRepresentable {
     let url: URL?
-    let holder: BrowserHolder
+    let holder: WKHolder
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+    final class Coordinator { var lastRequested: URL? }
 
     func makeUIView(context: Context) -> WKWebView {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
+        config.mediaTypesRequiringUserActionForPlayback = []
         let web = WKWebView(frame: .zero, configuration: config)
         holder.web = web
+        context.coordinator.lastRequested = url
         if let url { web.load(URLRequest(url: url)) }
         return web
     }
 
     func updateUIView(_ web: WKWebView, context: Context) {
-        if let url, web.url != url { web.load(URLRequest(url: url)) }
+        guard let url, context.coordinator.lastRequested != url else { return }
+        context.coordinator.lastRequested = url
+        web.load(URLRequest(url: url))
     }
 }
 
@@ -222,140 +234,54 @@ private let videoProbeJS = """
 })()
 """
 
-struct WebVideoSheet: View {
-    var onPlay: (URL, PaneID, [String: String]) -> Void
-    @Environment(\.dismiss) private var dismiss
-
-    enum PaneID { case a, b }
-
-    @State private var address = "https://"
-    @State private var pageURL: URL?
-    @State private var note = ""
-    @StateObject private var holder = BrowserHolder()
-
-    var body: some View {
-        NavigationStack {
-            VStack(spacing: 0) {
-                HStack {
-                    TextField("URL", text: $address)
-                        .textFieldStyle(.roundedBorder)
-                        .keyboardType(.URL)
-                        .autocorrectionDisabled()
-                    Button("Go") { loadAddress() }
-                }
-                .padding(8)
-
-                WebView(url: pageURL, holder: holder)
-
-                HStack(spacing: 12) {
-                    Text(note)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(2)
-                    Spacer(minLength: 4)
-                    Button("Play in A") { probe(.a) }.buttonStyle(.bordered)
-                    Button("Play in B") { probe(.b) }.buttonStyle(.bordered)
-                    Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
-                }
-                .padding(8)
+/// Runs the probe in a web view; completion always fires on the main queue.
+func probeStream(in web: WKWebView,
+                 completion: @escaping (_ url: URL?, _ headers: [String: String], _ error: String?) -> Void) {
+    web.evaluateJavaScript(videoProbeJS) { result, error in
+        DispatchQueue.main.async {
+            guard let json = result as? String,
+                  let data = json.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                  let urlString = obj["url"], let url = URL(string: urlString)
+            else {
+                completion(nil, [:], error != nil
+                    ? "Page blocked the probe."
+                    : "No playable video found (blob/MSE streams can't be grabbed).")
+                return
             }
-            .navigationTitle("Browse & Stream")
-            .navigationBarTitleDisplayMode(.inline)
-        }
-    }
-
-    private func loadAddress() {
-        let text = address.hasPrefix("http") ? address : "https://" + address
-        if let url = URL(string: text) {
-            pageURL = url
-            note = ""
-        }
-    }
-
-    private func probe(_ pane: PaneID) {
-        guard let web = holder.web else { return }
-        web.evaluateJavaScript(videoProbeJS) { result, error in
-            DispatchQueue.main.async {
-                guard let json = result as? String,
-                      let data = json.data(using: .utf8),
-                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String],
-                      let urlString = obj["url"], let url = URL(string: urlString)
-                else {
-                    note = error != nil
-                        ? "Page blocked the probe."
-                        : "No playable video found (blob/MSE streams can't be grabbed)."
-                    return
+            var headers: [String: String] = [:]
+            if let page = obj["page"] {
+                headers["Referer"] = page
+                if let pageURL = URL(string: page), let scheme = pageURL.scheme, let host = pageURL.host {
+                    headers["Origin"] = "\(scheme)://\(host)"
                 }
-                var headers: [String: String] = [:]
-                if let page = obj["page"] {
-                    headers["Referer"] = page
-                    if let pageURL = URL(string: page), let scheme = pageURL.scheme, let host = pageURL.host {
-                        headers["Origin"] = "\(scheme)://\(host)"
-                    }
-                }
-                if let ua = obj["ua"] { headers["User-Agent"] = ua }
-                onPlay(url, pane, headers)
-                let leaf = url.lastPathComponent.isEmpty ? (url.host ?? "") : url.lastPathComponent
-                note = "Captured: \(leaf)"
             }
+            if let ua = obj["ua"] { headers["User-Agent"] = ua }
+            completion(url, headers, nil)
         }
     }
 }
 
-// MARK: - Content
+// MARK: - Pane (one per side: video player + browser mode)
 
-struct ContentView: View {
-    @StateObject private var a = PlayerModel()
-    @StateObject private var b = PlayerModel()
+struct PaneView: View {
+    @ObservedObject var model: PlayerModel
+    let label: String
+    var onLoaded: () -> Void
 
-    @State private var playing = false
-    @State private var showWeb = false
-
-    // The Duo's size classes are identical in both orientations on the inner
-    // display, so the only honest left/right-vs-top/bottom rule is geometry:
-    // landscape container -> side-by-side, portrait -> stacked.
     var body: some View {
-        GeometryReader { geo in
-            VStack(spacing: 8) {
-                if geo.size.width > geo.size.height {
-                    HStack(spacing: 6) { panes }
-                } else {
-                    VStack(spacing: 6) { panes }
-                }
-
-                controls
-            }
-            .padding(8)
-            .frame(width: geo.size.width, height: geo.size.height)
-        }
-        .background(Color.black)
-        .preferredColorScheme(.dark)
-        .onAppear { Audio.configure() }
-        .sheet(isPresented: $showWeb) {
-            WebVideoSheet { url, pane, headers in
-                let model = pane == .a ? a : b
-                model.load(url, httpHeaders: headers.isEmpty ? nil : headers)
-                playing = true
-            }
-        }
-    }
-
-    @ViewBuilder
-    private var panes: some View {
-        pane(model: a, label: "A", volume: $a.volume)
-        pane(model: b, label: "B", volume: $b.volume)
-    }
-
-    // MARK: Panes
-
-    @ViewBuilder
-    private func pane(model: PlayerModel, label: String,
-                      volume: Binding<Double>) -> some View {
         VStack(spacing: 4) {
             ZStack(alignment: .topLeading) {
-                PlayerLayerView(player: model.player, fill: model.fill)
-                    .background(Color(white: 0.08))
-                    .clipShape(RoundedRectangle(cornerRadius: 10))
+                Group {
+                    if model.showWeb {
+                        WebView(url: model.webURL, holder: model.browser)
+                    } else {
+                        PlayerLayerView(player: model.player, fill: model.fill)
+                    }
+                }
+                .background(Color(white: 0.08))
+                .clipShape(RoundedRectangle(cornerRadius: 10))
+
                 Text(label)
                     .font(.caption.bold())
                     .padding(4)
@@ -363,50 +289,71 @@ struct ContentView: View {
                     .padding(4)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .onTapGesture { model.setPlaying(!model.isPlaying) }
+            .onTapGesture { if !model.showWeb { model.setPlaying(!model.isPlaying) } }
 
-            HStack {
-                Text(model.name)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                Spacer(minLength: 4)
-                Button {
-                    model.fill.toggle()
-                } label: {
-                    Image(systemName: model.fill
-                          ? "arrow.down.right.and.arrow.up.left"
-                          : "arrow.up.left.and.arrow.down.right")
-                        .padding(6)
-                        .background(.quaternary, in: Circle())
-                }
-                .buttonStyle(.plain)
-                .help(model.fill ? "Fit video (letterbox)" : "Fill pane (crop)")
-                Button("Load") {
-                    let target = model
-                    Task { @MainActor in
-                        FilePickerPresenter.shared.presentVideoPicker { url in
-                            importVideo(url, into: target)
-                        }
-                    }
-                }
-                .buttonStyle(.bordered)
-            }
-
-            transport(model: model)
-
-            HStack(spacing: 4) {
-                Image(systemName: "speaker.wave.2.fill")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                Slider(value: volume, in: 0...1)
-                    .controlSize(.mini)
+            if model.showWeb {
+                webControls
+            } else {
+                videoControls
             }
         }
     }
 
+    // MARK: Video-mode rows
+
     @ViewBuilder
-    private func transport(model: PlayerModel) -> some View {
+    private var videoControls: some View {
+        HStack {
+            Text(model.name)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            Button {
+                model.fill.toggle()
+            } label: {
+                Image(systemName: model.fill
+                      ? "arrow.down.right.and.arrow.up.left"
+                      : "arrow.up.left.and.arrow.down.right")
+                    .padding(6)
+                    .background(.quaternary, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help(model.fill ? "Fit video (letterbox)" : "Fill pane (crop)")
+            Button {
+                model.showWeb = true
+                if model.webURL == nil { model.webURL = URL(string: model.webAddress) }
+            } label: {
+                Image(systemName: "globe")
+                    .padding(6)
+                    .background(.quaternary, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .help("Browse the web in this pane")
+            Button("Load") {
+                let target = model
+                Task { @MainActor in
+                    FilePickerPresenter.shared.presentVideoPicker { url in
+                        importVideo(url, into: target)
+                    }
+                }
+            }
+            .buttonStyle(.bordered)
+        }
+
+        transport
+
+        HStack(spacing: 4) {
+            Image(systemName: "speaker.wave.2.fill")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Slider(value: $model.volume, in: 0...1)
+                .controlSize(.mini)
+        }
+    }
+
+    @ViewBuilder
+    private var transport: some View {
         HStack(spacing: 6) {
             Button {
                 model.setPlaying(!model.isPlaying)
@@ -445,6 +392,126 @@ struct ContentView: View {
         .buttonStyle(.borderless)
     }
 
+    // MARK: Web-mode rows
+
+    @ViewBuilder
+    private var webControls: some View {
+        HStack(spacing: 6) {
+            TextField("URL", text: $model.webAddress)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .keyboardType(.URL)
+                .autocorrectionDisabled()
+                .onSubmit { go() }
+            Button("Go") { go() }
+            Button {
+                probeHere()
+            } label: {
+                Image(systemName: "play.circle")
+            }
+            .help("Capture this page's video and play it in this pane")
+            Button {
+                model.showWeb = false
+            } label: {
+                Image(systemName: "xmark.circle")
+            }
+            .help("Back to video")
+        }
+        .buttonStyle(.bordered)
+        .font(.caption)
+
+        if !model.webNote.isEmpty {
+            Text(model.webNote)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private func go() {
+        let text = model.webAddress.hasPrefix("http") ? model.webAddress : "https://" + model.webAddress
+        if let url = URL(string: text) {
+            model.webURL = url
+            model.webNote = ""
+        }
+    }
+
+    private func probeHere() {
+        guard let web = model.browser.web else { return }
+        model.webNote = "Probing page…"
+        probeStream(in: web) { url, headers, error in
+            if let url {
+                model.load(url, httpHeaders: headers.isEmpty ? nil : headers)
+                model.showWeb = false
+                model.webNote = ""
+                onLoaded()
+            } else {
+                model.webNote = error ?? "No playable video found."
+            }
+        }
+    }
+
+    // MARK: Import
+
+    private func importVideo(_ url: URL, into model: PlayerModel) {
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        let ext = url.pathExtension.isEmpty ? "mov" : url.pathExtension
+        let dest = URL.temporaryDirectory
+            .appending(path: "DualPlay-\(UUID().uuidString.prefix(8)).\(ext)")
+        do {
+            try FileManager.default.copyItem(at: url, to: dest)
+            model.load(dest)
+            onLoaded()
+        } catch {
+            model.name = "Couldn't import: \(error.localizedDescription)"
+        }
+    }
+
+    private func fmt(_ t: Double) -> String {
+        guard t.isFinite else { return "--:--" }
+        let s = Int(t)
+        return String(format: "%d:%02d", s / 60, s % 60)
+    }
+}
+
+// MARK: - Content
+
+struct ContentView: View {
+    @StateObject private var a = PlayerModel()
+    @StateObject private var b = PlayerModel()
+
+    @State private var playing = false
+
+    // The Duo's size classes are identical in both orientations on the inner
+    // display, so the only honest left/right-vs-top/bottom rule is geometry:
+    // landscape container -> side-by-side, portrait -> stacked.
+    var body: some View {
+        GeometryReader { geo in
+            VStack(spacing: 8) {
+                if geo.size.width > geo.size.height {
+                    HStack(spacing: 6) { panes }
+                } else {
+                    VStack(spacing: 6) { panes }
+                }
+
+                controls
+            }
+            .padding(8)
+            .frame(width: geo.size.width, height: geo.size.height)
+        }
+        .background(Color.black)
+        .preferredColorScheme(.dark)
+        .onAppear { Audio.configure() }
+    }
+
+    @ViewBuilder
+    private var panes: some View {
+        PaneView(model: a, label: "A") { playing = true }
+        PaneView(model: b, label: "B") { playing = true }
+    }
+
     // MARK: Shared controls
 
     private var controls: some View {
@@ -474,46 +541,15 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(!a.hasVideo || !b.hasVideo)
-
-                Button {
-                    showWeb = true
-                } label: {
-                    Label("Web", systemImage: "globe")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
             }
             .buttonBorderShape(.roundedRectangle)
 
-            Text("Tap a video to pause/resume it. −15/+15 and the timeline scrub per pane. Web streams direct MP4/HLS links; each clip loops.")
+            Text("Each pane: globe = browse the web in that pane; ▶ in web mode captures the page's video. −15/+15, scrub, fit/fill per pane; clips loop.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
         }
         .padding(.bottom, 4)
-    }
-
-    // MARK: Import
-
-    private func importVideo(_ url: URL, into model: PlayerModel) {
-        let scoped = url.startAccessingSecurityScopedResource()
-        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let ext = url.pathExtension.isEmpty ? "mov" : url.pathExtension
-        let dest = URL.temporaryDirectory
-            .appending(path: "DualPlay-\(UUID().uuidString.prefix(8)).\(ext)")
-        do {
-            try FileManager.default.copyItem(at: url, to: dest)
-            model.load(dest)
-            playing = true
-        } catch {
-            model.name = "Couldn't import: \(error.localizedDescription)"
-        }
-    }
-
-    private func fmt(_ t: Double) -> String {
-        guard t.isFinite else { return "--:--" }
-        let s = Int(t)
-        return String(format: "%d:%02d", s / 60, s % 60)
     }
 }
 
