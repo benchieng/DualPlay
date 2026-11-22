@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build unsigned device .app (Release, arm64)
+        run: |
+          set -euo pipefail
+          xcodebuild build \
+            -project DualPlay.xcodeproj \
+            -scheme DualPlay \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            -derivedDataPath derived
+
+      - name: Package artifact
+        run: |
+          set -euo pipefail
+          APP=$(find derived/Build/Products/Release-iphoneos -maxdepth 1 -name 'DualPlay.app')
+          test -n "$APP"
+          ditto -c -k --keepParent "$APP" DualPlay-unsigned.app.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DualPlay-unsigned
+          path: DualPlay-unsigned.app.zip

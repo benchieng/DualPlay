@@ -1,0 +1,8 @@
+# XcodeGen artifacts / build outputs
+DualPlay.xcodeproj/
+Support/Info.plist
+derived/
+build/
+*.xcuserstate
+xcuserdata/
+.DS_Store
