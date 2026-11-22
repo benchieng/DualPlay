@@ -10,8 +10,8 @@ final class PlayerModel: ObservableObject, Identifiable {
     let id = UUID()
     let player = AVPlayer()
     @Published var name: String = "No video loaded"
-    @Published var volume: Float = 1.0 {
-        didSet { player.volume = volume }
+    @Published var volume: Double = 1.0 {
+        didSet { player.volume = Float(volume) }
     }
 
     private var endObserver: NSObjectProtocol?
@@ -37,7 +37,7 @@ final class PlayerModel: ObservableObject, Identifiable {
 
     func load(_ url: URL) {
         player.replaceCurrentItem(with: AVPlayerItem(url: url))
-        player.volume = volume
+        player.volume = Float(volume)
         name = url.lastPathComponent
         player.play()
     }
