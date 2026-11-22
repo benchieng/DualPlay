@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import WebKit
 import UniformTypeIdentifiers
 
 // MARK: - Player model
@@ -12,9 +13,14 @@ final class PlayerModel: ObservableObject, Identifiable {
     @Published var volume: Double = 1.0 {
         didSet { player.volume = Float(volume) }
     }
+    @Published var isPlaying = false
+    @Published var currentTime: Double = 0
+    @Published var duration: Double = 0
 
     private var statusObservation: NSKeyValueObservation?
+    private var durationObservation: NSKeyValueObservation?
     private var endObserver: NSObjectProtocol?
+    private var timeObserver: Any?
 
     init() {
         // Loop: when the current item reaches its end, rewind and keep playing.
@@ -28,18 +34,30 @@ final class PlayerModel: ObservableObject, Identifiable {
                   item === self.player.currentItem else { return }
             self.player.seek(to: .zero)
             self.player.play()
+            self.isPlaying = true
+        }
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.25, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] time in
+            let seconds = CMTimeGetSeconds(time)
+            guard seconds.isFinite else { return }
+            Task { @MainActor in self?.currentTime = seconds }
         }
     }
 
     deinit {
         if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+        if let timeObserver { player.removeTimeObserver(timeObserver) }
     }
 
     func load(_ url: URL) {
         let item = AVPlayerItem(url: url)
         player.replaceCurrentItem(with: item)
         player.volume = Float(volume)
-        name = url.lastPathComponent
+        name = url.lastPathComponent.isEmpty ? url.host ?? url.absoluteString : url.lastPathComponent
+        duration = 0
+        currentTime = 0
         // Surface unplayable picks instead of failing silently.
         statusObservation?.invalidate()
         statusObservation = item.observe(\.status) { [weak self] observed, _ in
@@ -48,15 +66,32 @@ final class PlayerModel: ObservableObject, Identifiable {
                 self?.name = "Can't play \(url.lastPathComponent) — \(error.localizedDescription)"
             }
         }
+        durationObservation?.invalidate()
+        durationObservation = item.observe(\.duration) { [weak self] observed, _ in
+            let seconds = CMTimeGetSeconds(observed.duration)
+            guard seconds.isFinite, seconds > 0 else { return }
+            DispatchQueue.main.async { self?.duration = seconds }
+        }
         player.play()
+        isPlaying = true
     }
 
     func setPlaying(_ on: Bool) {
         on ? player.play() : player.pause()
+        isPlaying = on
+    }
+
+    func skip(_ delta: Double) {
+        seek(to: max(0, min(currentTime + delta, duration > 0 ? duration : .greatestFiniteMagnitude)))
+    }
+
+    func seek(to seconds: Double) {
+        currentTime = seconds
+        player.seek(to: CMTime(seconds: seconds, preferredTimescale: 600))
     }
 
     func restart() {
-        player.seek(to: .zero)
+        seek(to: 0)
     }
 
     var hasVideo: Bool { player.currentItem != nil }
@@ -124,6 +159,111 @@ final class FilePickerPresenter: NSObject, UIDocumentPickerDelegate {
     }
 }
 
+// MARK: - Web browser sheet (sniffs <video> sources for streaming)
+
+final class BrowserHolder: ObservableObject {
+    weak var web: WKWebView?
+}
+
+struct WebView: UIViewRepresentable {
+    let url: URL?
+    let holder: BrowserHolder
+
+    func makeUIView(context: Context) -> WKWebView {
+        let config = WKWebViewConfiguration()
+        config.allowsInlineMediaPlayback = true
+        let web = WKWebView(frame: .zero, configuration: config)
+        holder.web = web
+        if let url { web.load(URLRequest(url: url)) }
+        return web
+    }
+
+    func updateUIView(_ web: WKWebView, context: Context) {
+        if let url, web.url != url { web.load(URLRequest(url: url)) }
+    }
+}
+
+/// Extract the first non-blob video URL from the page.
+private let videoProbeJS = """
+(() => {
+  const vs = [...document.querySelectorAll('video')]
+    .map(v => v.currentSrc || v.querySelector('source')?.src || v.src)
+    .filter(s => s && !s.startsWith('blob:'));
+  if (vs.length) return vs[0];
+  const links = [...document.querySelectorAll('a[href]')]
+    .map(a => a.href)
+    .filter(h => /\.(mp4|m4v|mov|mov|m3u8)(\\?|$)/i.test(h));
+  return links.length ? links[0] : null;
+})()
+"""
+
+struct WebVideoSheet: View {
+    var onPlay: (URL, PaneID) -> Void
+    @Environment(\.dismiss) private var dismiss
+
+    enum PaneID { case a, b }
+
+    @State private var address = "https://"
+    @State private var pageURL: URL?
+    @State private var note = ""
+    @StateObject private var holder = BrowserHolder()
+
+    var body: some View {
+        NavigationStack {
+            VStack(spacing: 0) {
+                HStack {
+                    TextField("URL", text: $address)
+                        .textFieldStyle(.roundedBorder)
+                        .keyboardType(.URL)
+                        .autocorrectionDisabled()
+                    Button("Go") { loadAddress() }
+                }
+                .padding(8)
+
+                WebView(url: pageURL, holder: holder)
+
+                HStack(spacing: 12) {
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                    Spacer(minLength: 4)
+                    Button("Play in A") { probe(.a) }.buttonStyle(.bordered)
+                    Button("Play in B") { probe(.b) }.buttonStyle(.bordered)
+                    Button("Done") { dismiss() }.buttonStyle(.borderedProminent)
+                }
+                .padding(8)
+            }
+            .navigationTitle("Browse & Stream")
+            .navigationBarTitleDisplayMode(.inline)
+        }
+    }
+
+    private func loadAddress() {
+        let text = address.hasPrefix("http") ? address : "https://" + address
+        if let url = URL(string: text) {
+            pageURL = url
+            note = ""
+        }
+    }
+
+    private func probe(_ pane: PaneID) {
+        guard let web = holder.web else { return }
+        web.evaluateJavaScript(videoProbeJS) { result, error in
+            DispatchQueue.main.async {
+                if error != nil {
+                    note = "Page blocked the probe."
+                } else if let string = result as? String, let url = URL(string: string) {
+                    onPlay(url, pane)
+                    note = "Playing \(url.lastPathComponent.isEmpty ? url.host ?? "" : url.lastPathComponent)"
+                } else {
+                    note = "No playable video found (blob/MSE streams can't be grabbed)."
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Content
 
 struct ContentView: View {
@@ -131,6 +271,7 @@ struct ContentView: View {
     @StateObject private var b = PlayerModel()
 
     @State private var playing = false
+    @State private var showWeb = false
 
     // Duo rule from Apple: outer display reports compact width, inner display
     // regular. Two branches, no idiom checks.
@@ -138,7 +279,7 @@ struct ContentView: View {
     private var wide: Bool { hSize == .regular }
 
     var body: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: 8) {
             if wide {
                 HStack(spacing: 6) { panes }
             } else {
@@ -152,6 +293,13 @@ struct ContentView: View {
         .background(Color.black)
         .preferredColorScheme(.dark)
         .onAppear { Audio.configure() }
+        .sheet(isPresented: $showWeb) {
+            WebVideoSheet { url, pane in
+                let model = pane == .a ? a : b
+                model.load(url)
+                playing = true
+            }
+        }
     }
 
     @ViewBuilder
@@ -177,6 +325,7 @@ struct ContentView: View {
                     .padding(4)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .onTapGesture { model.setPlaying(!model.isPlaying) }
 
             HStack {
                 Text(model.name)
@@ -195,6 +344,8 @@ struct ContentView: View {
                 .buttonStyle(.bordered)
             }
 
+            transport(model: model)
+
             HStack(spacing: 4) {
                 Image(systemName: "speaker.wave.2.fill")
                     .font(.caption2)
@@ -203,6 +354,46 @@ struct ContentView: View {
                     .controlSize(.mini)
             }
         }
+    }
+
+    @ViewBuilder
+    private func transport(model: PlayerModel) -> some View {
+        HStack(spacing: 6) {
+            Button {
+                model.setPlaying(!model.isPlaying)
+            } label: {
+                Image(systemName: model.isPlaying ? "pause.fill" : "play.fill")
+                    .frame(width: 22)
+            }
+            Button {
+                model.skip(-15)
+            } label: {
+                Text("−15").font(.caption.bold())
+                    .padding(.horizontal, 4).padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
+            }
+            Text(fmt(model.currentTime))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Slider(
+                value: Binding(get: { model.currentTime },
+                               set: { model.seek(to: $0) }),
+                in: 0...max(model.duration, 0.1)
+            )
+            .controlSize(.mini)
+            .disabled(model.duration <= 0)
+            Text(fmt(model.duration))
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+            Button {
+                model.skip(15)
+            } label: {
+                Text("+15").font(.caption.bold())
+                    .padding(.horizontal, 4).padding(.vertical, 2)
+                    .background(.quaternary, in: Capsule())
+            }
+        }
+        .buttonStyle(.borderless)
     }
 
     // MARK: Shared controls
@@ -234,10 +425,18 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(!a.hasVideo || !b.hasVideo)
+
+                Button {
+                    showWeb = true
+                } label: {
+                    Label("Web", systemImage: "globe")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
             }
             .buttonBorderShape(.roundedRectangle)
 
-            Text("Both clips play in one app, so iOS mixes the two soundtracks. Each clip loops. The sliders blend A and B.")
+            Text("Tap a video to pause/resume it. −15/+15 and the timeline scrub per pane. Web streams direct MP4/HLS links; each clip loops.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -260,6 +459,12 @@ struct ContentView: View {
         } catch {
             model.name = "Couldn't import: \(error.localizedDescription)"
         }
+    }
+
+    private func fmt(_ t: Double) -> String {
+        guard t.isFinite else { return "--:--" }
+        let s = Int(t)
+        return String(format: "%d:%02d", s / 60, s % 60)
     }
 }
 

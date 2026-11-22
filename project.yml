@@ -23,6 +23,9 @@ targets:
         CFBundleShortVersionString: $(MARKETING_VERSION)
         CFBundleVersion: $(CURRENT_PROJECT_VERSION)
         UILaunchScreen: {}
+        # HTTP streaming from web/NAS sources may be plain http.
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft
