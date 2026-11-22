@@ -184,6 +184,21 @@ final class WKHolder {
     weak var web: WKWebView?
 }
 
+/// Injected at document start: records every media-shaped URL the page
+/// downloads, so MSE/blob players (hls.js, shaka, JW) still reveal the real
+/// m3u8/mp4 behind their blob: URLs. The probe then hands it to AVPlayer.
+private let probeHookJS = """
+(() => {
+  if (window.__dpUrls) return;
+  Object.defineProperty(window, '__dpUrls', { value: [], writable: false });
+  const add = u => { try { if (u && /\.(m3u8|mp4|m4v|mpegurl|mpd)(\?|$)/i.test(u) && window.__dpUrls.length < 200) window.__dpUrls.push(u); } catch (e) {} };
+  const of = window.fetch;
+  window.fetch = function (input, init) { add(typeof input === 'string' ? input : input && input.url); return of.apply(this, arguments); };
+  const os = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) { add(url); return os.apply(this, arguments); };
+})()
+"""
+
 struct WebView: UIViewRepresentable {
     let url: URL?
     let holder: WKHolder
@@ -195,6 +210,9 @@ struct WebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
+        config.userContentController.addUserScript(
+            WKUserScript(source: probeHookJS, injectionTime: .atDocumentStart, forMainFrameOnly: false)
+        )
         let web = WKWebView(frame: .zero, configuration: config)
         holder.web = web
         context.coordinator.lastRequested = url
@@ -220,7 +238,8 @@ private let videoProbeJS = """
   if (v) { const s = v.currentSrc || v.src; if (s && !s.startsWith('blob:')) direct.push(s); }
   for (const el of document.querySelectorAll('video source')) { if (el.src && !el.src.startsWith('blob:')) direct.push(el.src); }
   const html = document.documentElement.innerHTML.replaceAll('\\\\/', '/');
-  const found = html.match(/https?:\\/\\/[^"'\\s<>]+?\\.(?:m3u8|mp4|m4v)(?:\\?[^"'\\s<>]*)?/gi) || [];
+  const fetched = (window.__dpUrls || []).filter(u => /^https?:/i.test(u));
+  const found = [...new Set([...fetched, ...(html.match(/https?:\\/\\/[^"'\\s<>]+?\\.(?:m3u8|mp4|m4v|mpd)(?:\\?[^"'\\s<>]*)?/gi) || [])])];
   const scored = [...direct.map(u => [0, u]),
                   ...found.map(u => [/\\.m3u8/i.test(u) ? 1 : 2, u])];
   const seen = new Set();
