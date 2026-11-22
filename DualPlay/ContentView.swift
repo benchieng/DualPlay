@@ -82,6 +82,48 @@ final class PlayerUIView: UIView {
     var playerLayer: AVPlayerLayer { layer as! AVPlayerLayer }
 }
 
+// MARK: - Document picker (raw UIKit; SwiftUI fileImporter taps are dead on iOS 27 iPhone)
+
+@MainActor
+final class FilePickerPresenter: NSObject, UIDocumentPickerDelegate {
+    static let shared = FilePickerPresenter()
+
+    private var onPick: ((URL) -> Void)?
+    private var retaining = false
+
+    func presentVideoPicker(onPick: ((URL) -> Void)? = nil) {
+        self.onPick = onPick
+        guard let window = UIApplication.shared.connectedScenes
+            .compactMap({ $0 as? UIWindowScene })
+            .flatMap(\.windows)
+            .first(where: \.isKeyWindow),
+              var top = window.rootViewController
+        else { return }
+        while let presented = top.presentedViewController, !presented.isBeingDismissed {
+            top = presented
+        }
+
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.movie, .video], asCopy: true)
+        picker.allowsMultipleSelection = false
+        picker.delegate = self
+        retaining = true   // keep the delegate alive until pick/cancel
+        top.present(picker, animated: true)
+    }
+
+    func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+        retaining = false
+        let callback = onPick
+        onPick = nil
+        // asCopy: true already placed the file in our sandbox.
+        if let url = urls.first { callback?(url) }
+    }
+
+    func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+        retaining = false
+        onPick = nil
+    }
+}
+
 // MARK: - Content
 
 struct ContentView: View {
@@ -89,8 +131,6 @@ struct ContentView: View {
     @StateObject private var b = PlayerModel()
 
     @State private var playing = false
-    @State private var importA = false
-    @State private var importB = false
 
     // Duo rule from Apple: outer display reports compact width, inner display
     // regular. Two branches, no idiom checks.
@@ -116,15 +156,14 @@ struct ContentView: View {
 
     @ViewBuilder
     private var panes: some View {
-        pane(model: a, label: "A", importing: $importA, volume: $a.volume)
-        pane(model: b, label: "B", importing: $importB, volume: $b.volume)
+        pane(model: a, label: "A", volume: $a.volume)
+        pane(model: b, label: "B", volume: $b.volume)
     }
 
     // MARK: Panes
 
     @ViewBuilder
     private func pane(model: PlayerModel, label: String,
-                      importing: Binding<Bool>,
                       volume: Binding<Double>) -> some View {
         VStack(spacing: 4) {
             ZStack(alignment: .topLeading) {
@@ -145,8 +184,15 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                Button("Load") { importing.wrappedValue = true }
-                    .buttonStyle(.bordered)
+                Button("Load") {
+                    let target = model
+                    Task { @MainActor in
+                        FilePickerPresenter.shared.presentVideoPicker { url in
+                            importVideo(url, into: target)
+                        }
+                    }
+                }
+                .buttonStyle(.bordered)
             }
 
             HStack(spacing: 4) {
@@ -155,16 +201,6 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
                 Slider(value: volume, in: 0...1)
                     .controlSize(.mini)
-            }
-        }
-        // [.item] on purpose: the video/movie filters gray out camera (QuickTime
-        // subtype) and cloud-provider files on many iOS builds, so taps do
-        // nothing. Anything is selectable; AVPlayer reports bad picks in-pane.
-        .fileImporter(isPresented: importing,
-                      allowedContentTypes: [.item],
-                      allowsMultipleSelection: false) { result in
-            if case .success(let urls) = result, let url = urls.first {
-                importVideo(url, into: model)
             }
         }
     }
@@ -209,7 +245,7 @@ struct ContentView: View {
         .padding(.bottom, 4)
     }
 
-    // MARK: Import (Files app via fileImporter)
+    // MARK: Import
 
     private func importVideo(_ url: URL, into model: PlayerModel) {
         let scoped = url.startAccessingSecurityScopedResource()
