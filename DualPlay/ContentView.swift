@@ -308,13 +308,16 @@ struct ContentView: View {
     @State private var showWeb = false
 
     // Duo rule from Apple: outer display reports compact width, inner display
-    // regular. Two branches, no idiom checks.
+    // regular in BOTH orientations. So side-by-side only when the pose is
+    // genuinely wide (regular width + compact height = unfolded landscape);
+    // unfolded portrait stacks top/bottom so each pane gets the full width.
     @Environment(\.horizontalSizeClass) private var hSize
-    private var wide: Bool { hSize == .regular }
+    @Environment(\.verticalSizeClass) private var vSize
+    private var sideBySide: Bool { hSize == .regular && vSize == .compact }
 
     var body: some View {
         VStack(spacing: 8) {
-            if wide {
+            if sideBySide {
                 HStack(spacing: 6) { panes }
             } else {
                 VStack(spacing: 6) { panes }
