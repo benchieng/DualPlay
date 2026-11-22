@@ -107,8 +107,8 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 10) {
             HStack(spacing: 6) {
-                pane(model: a, label: "A", selection: $pickingA)
-                pane(model: b, label: "B", selection: $pickingB)
+                pane(model: a, label: "A", selection: $pickingA, volume: $a.volume)
+                pane(model: b, label: "B", selection: $pickingB, volume: $b.volume)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -125,7 +125,8 @@ struct ContentView: View {
 
     @ViewBuilder
     private func pane(model: PlayerModel, label: String,
-                      selection: Binding<PhotosPickerItem?>) -> some View {
+                      selection: Binding<PhotosPickerItem?>,
+                      volume: Binding<Double>) -> some View {
         VStack(spacing: 4) {
             ZStack(alignment: .topLeading) {
                 PlayerLayerView(player: model.player)
@@ -154,7 +155,7 @@ struct ContentView: View {
                 Image(systemName: "speaker.wave.2.fill")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
-                Slider(value: model.volume, in: 0...1)
+                Slider(value: volume, in: 0...1)
                     .controlSize(.mini)
             }
         }
