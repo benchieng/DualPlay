@@ -51,8 +51,16 @@ final class PlayerModel: ObservableObject, Identifiable {
         if let timeObserver { player.removeTimeObserver(timeObserver) }
     }
 
-    func load(_ url: URL) {
-        let item = AVPlayerItem(url: url)
+    func load(_ url: URL, httpHeaders: [String: String]? = nil) {
+        let asset: AVURLAsset
+        if let httpHeaders {
+            // Hotlink-protected streams (missav et al.) reject bare AVPlayer
+            // requests — replay the browser's Referer/Origin/UA.
+            asset = AVURLAsset(url: url, options: [AVURLAssetHTTPHeaderFieldsKey: httpHeaders])
+        } else {
+            asset = AVURLAsset(url: url)
+        }
+        let item = AVPlayerItem(asset: asset)
         player.replaceCurrentItem(with: item)
         player.volume = Float(volume)
         name = url.lastPathComponent.isEmpty ? url.host ?? url.absoluteString : url.lastPathComponent
@@ -183,22 +191,33 @@ struct WebView: UIViewRepresentable {
     }
 }
 
-/// Extract the first non-blob video URL from the page.
+/// Finds a playable stream on the page: live <video> sources first, then
+/// raw m3u8/mp4 URLs buried in player scripts (with JSON-escaped slashes
+/// normalized). Returns JSON {url, page, ua} so playback can replay the
+/// browser's Referer/Origin/User-Agent on hotlink-protected streams.
 private let videoProbeJS = """
 (() => {
-  const vs = [...document.querySelectorAll('video')]
-    .map(v => v.currentSrc || v.querySelector('source')?.src || v.src)
-    .filter(s => s && !s.startsWith('blob:'));
-  if (vs.length) return vs[0];
-  const links = [...document.querySelectorAll('a[href]')]
-    .map(a => a.href)
-    .filter(h => /\\.(mp4|m4v|mov|m3u8)(\\?|$)/i.test(h));
-  return links.length ? links[0] : null;
+  const direct = [];
+  const v = document.querySelector('video');
+  if (v) { const s = v.currentSrc || v.src; if (s && !s.startsWith('blob:')) direct.push(s); }
+  for (const el of document.querySelectorAll('video source')) { if (el.src && !el.src.startsWith('blob:')) direct.push(el.src); }
+  const html = document.documentElement.innerHTML.replaceAll('\\\\/', '/');
+  const found = html.match(/https?:\\/\\/[^"'\\s<>]+?\\.(?:m3u8|mp4|m4v)(?:\\?[^"'\\s<>]*)?/gi) || [];
+  const scored = [...direct.map(u => [0, u]),
+                  ...found.map(u => [/\\.m3u8/i.test(u) ? 1 : 2, u])];
+  const seen = new Set();
+  const uniq = [];
+  for (const [p, u] of scored) {
+    const clean = u.replaceAll('\\\\', '');
+    if (!seen.has(clean) && /^https?:/i.test(clean)) { seen.add(clean); uniq.push([p, clean]); }
+  }
+  uniq.sort((a, b) => a[0] - b[0]);
+  return JSON.stringify({ url: uniq.length ? uniq[0][1] : null, page: location.href, ua: navigator.userAgent });
 })()
 """
 
 struct WebVideoSheet: View {
-    var onPlay: (URL, PaneID) -> Void
+    var onPlay: (URL, PaneID, [String: String]) -> Void
     @Environment(\.dismiss) private var dismiss
 
     enum PaneID { case a, b }
@@ -251,14 +270,27 @@ struct WebVideoSheet: View {
         guard let web = holder.web else { return }
         web.evaluateJavaScript(videoProbeJS) { result, error in
             DispatchQueue.main.async {
-                if error != nil {
-                    note = "Page blocked the probe."
-                } else if let string = result as? String, let url = URL(string: string) {
-                    onPlay(url, pane)
-                    note = "Playing \(url.lastPathComponent.isEmpty ? url.host ?? "" : url.lastPathComponent)"
-                } else {
-                    note = "No playable video found (blob/MSE streams can't be grabbed)."
+                guard let json = result as? String,
+                      let data = json.data(using: .utf8),
+                      let obj = try? JSONSerialization.jsonObject(with: data) as? [String: String],
+                      let urlString = obj["url"], let url = URL(string: urlString)
+                else {
+                    note = error != nil
+                        ? "Page blocked the probe."
+                        : "No playable video found (blob/MSE streams can't be grabbed)."
+                    return
                 }
+                var headers: [String: String] = [:]
+                if let page = obj["page"] {
+                    headers["Referer"] = page
+                    if let pageURL = URL(string: page), let scheme = pageURL.scheme, let host = pageURL.host {
+                        headers["Origin"] = "\(scheme)://\(host)"
+                    }
+                }
+                if let ua = obj["ua"] { headers["User-Agent"] = ua }
+                onPlay(url, pane, headers)
+                let leaf = url.lastPathComponent.isEmpty ? (url.host ?? "") : url.lastPathComponent
+                note = "Captured: \(leaf)"
             }
         }
     }
@@ -294,9 +326,9 @@ struct ContentView: View {
         .preferredColorScheme(.dark)
         .onAppear { Audio.configure() }
         .sheet(isPresented: $showWeb) {
-            WebVideoSheet { url, pane in
+            WebVideoSheet { url, pane, headers in
                 let model = pane == .a ? a : b
-                model.load(url)
+                model.load(url, httpHeaders: headers.isEmpty ? nil : headers)
                 playing = true
             }
         }
