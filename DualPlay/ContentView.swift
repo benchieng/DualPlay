@@ -192,7 +192,7 @@ private let videoProbeJS = """
   if (vs.length) return vs[0];
   const links = [...document.querySelectorAll('a[href]')]
     .map(a => a.href)
-    .filter(h => /\.(mp4|m4v|mov|mov|m3u8)(\\?|$)/i.test(h));
+    .filter(h => /\\.(mp4|m4v|mov|m3u8)(\\?|$)/i.test(h));
   return links.length ? links[0] : null;
 })()
 """
