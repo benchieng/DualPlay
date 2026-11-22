@@ -62,7 +62,7 @@ jobs:
       # content-sniff .ipa files and rename them to .zip).
       - name: Publish rolling release (latest-ci)
         env:
-          GH_TOKEN: *** secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           gh release create latest-ci \
