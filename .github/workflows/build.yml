@@ -17,11 +17,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Select newest installed Xcode 27.x
+      # Pin the exact Xcode: "newest installed" drifts silently when the
+      # runner image updates, changing the toolchain under a green build.
+      - name: Select pinned Xcode
         run: |
           set -euo pipefail
-          XC=$(ls -d /Applications/Xcode_27*.app 2>/dev/null | sort -V | tail -1)
-          if [ -n "$XC" ]; then echo "using $XC"; sudo xcode-select -s "$XC/Contents/Developer"; fi
+          XC=/Applications/Xcode_27.2.0.app
+          if [ ! -d "$XC" ]; then echo "pinned Xcode missing; found: $(ls -d /Applications/Xcode_*.app 2>/dev/null)"; exit 1; fi
+          echo "using $XC"
+          sudo xcode-select -s "$XC/Contents/Developer"
           xcodebuild -version
 
       - name: Install XcodeGen
