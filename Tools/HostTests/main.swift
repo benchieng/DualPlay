@@ -40,7 +40,7 @@ for size in [(390.0, 844.0), (430.0, 951.0), (0.0, 100.0), (10.0, 10.0)] {
 
 // MARK: Side-by-side invariants
 
-for size in [(951.0, 430.0), (844.0, 390.0), (600.0, 100.0), (0.0, 1.0)] {
+for size in [(951.0, 430.0), (844.0, 390.0), (600.0, 100.0), (1.0, 0.0)] {
     let (a, b) = paneRects(width: size.0, height: size.1, spacing: 6)
     expect(!overlapping(a, b), "landscape panes never overlap at \(size)")
     expect(inside(a, size.0, size.1) && inside(b, size.0, size.1), "landscape panes inside container at \(size)")
