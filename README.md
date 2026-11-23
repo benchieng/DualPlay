@@ -70,16 +70,23 @@ plain `swiftc` — no simulator needed.
 
 Lessons from production Duo code that apply to any two-pane Duo app:
 
-1. **Posture is geometry, not device state.** UIKit reserves a *vertical
-   division region* in the view when the Duo is half-open ("book") — that inset,
-   not window size or a hinge API, is the reliable posture signal, because a
-   side window can fake any aspect ratio. Current DualPlay uses a plain
-   width>height rule; a real half-open posture check should read the division
-   region and treat the two physical screens as content boundaries.
-2. **Never re-lay-out video layers mid-transition.** Apollo hands pane width to
-   pages as an extra safe-area inset so nothing is re-measured while panels
-   open/close, and pauses → moves layers → resumes around fold/rotation.
-   Two `AVPlayerLayer`s re-laid-out mid-fold glitch or hitch audio.
+1. **Posture is geometry, not device state.** — *implemented.* When the Duo
+   is half-open ("book"), UIKit reserves a vertical *division region* on the
+   window (stock iOS 27.1 API: `-[UIWindow reservedRegionsOfKind:]` with
+   `UIViewReservedRegionKind.divisionRegionKind`). `DuoPosture.swift` reads
+   it name-based via the Obj-C runtime (degrades to "no strip" on non-Duo
+   devices), and the side-by-side divider snaps to the strip so **each pane
+   is locked to one physical screen** — no video straddles the hinge. UIKit
+   posts no change notification and publishes the region up to ~1.5 s after
+   the hinge moves, so we poll every 300 ms and act on actual changes. (The
+   battery-polite variant for a shipping app: wake on `UIHingeInteraction`,
+   poll 4 s after each hinge event.)
+2. **Never re-lay-out video layers mid-transition.** — *implemented.* Panes
+   live in one identity-stable ZStack (no container-type switch, so folds
+   and rotations never rebuild player layers or reload web pages), and every
+   posture change runs **pause → re-anchor → resume 0.3 s after settle**,
+   gated on identity re-validation (same item attached, nothing else resumed
+   it), not on a bare delay.
 3. **Duo bugs live in teardown order.** Both real review findings on Apollo's PR
    were posture state leaking across the fold (insets reapplied after release).
    Per-posture state — pane sizes, fit/fill, scroll — must be released before
@@ -104,6 +111,7 @@ Lessons from production Duo code that apply to any two-pane Duo app:
 | iPhone Duo | 27.2 | latest-ci | real | dual AVPlayer mix confirmed; per-pane browser OK; blob-capture probe pending |
 | iPhone (compact) | 27.2 | latest-ci | real | stacked layout OK |
 | iPhone Duo | 27.2 | latest-ci (post-layout-rework) | real | **PENDING human test:** rotate/fold while both videos play — audio must not hitch, browser panes must not reload; ⇄ swaps panes; scrub still tracks |
+| iPhone Duo, half-open (book) | 27.2 | latest-ci (post-book-posture) | real | **PENDING human test:** divider should sit on the hinge with each video on its own screen (nothing chopped by the seam); fold book→flat while playing — brief pause then auto-resume, no stutter; fold to cover with a browser pane open (the field notes' required test) |
 
 The pending row is the field-notes rule in action: layout changes that touch
 media transitions are only "working" once a person ran them on the hardware.

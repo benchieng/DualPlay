@@ -97,6 +97,33 @@ final class PlayerModel: ObservableObject, Identifiable {
         isPlaying = on
     }
 
+    // MARK: Geometry-move pause/resume (Apollo's ResumeVideosAfterMove)
+    // Mid-transition AVPlayerLayer re-layout is the glitch class; pause
+    // before the panes move, then resume 0.3 s after settle — but on
+    // identity+state re-validation, not on a bare delay: same item still
+    // attached, nothing else resumed it in the meantime.
+
+    struct MoveSnapshot {
+        let wasPlaying: Bool
+        let item: AVPlayerItem?
+    }
+
+    /// Pauses for an upcoming pane move WITHOUT touching published UI state
+    /// (the pause is a 0.3 s implementation detail, not a user action).
+    func snapshotForMove() -> MoveSnapshot {
+        let was = player.timeControlStatus == .playing
+        if was { player.pause() }
+        return MoveSnapshot(wasPlaying: was, item: player.currentItem)
+    }
+
+    func resumeAfterMove(_ snap: MoveSnapshot) {
+        guard snap.wasPlaying,
+              player.currentItem === snap.item,  // still the same video
+              player.rate == 0                    // user didn't resume it meanwhile
+        else { return }
+        player.play()
+    }
+
     func skip(_ delta: Double) {
         seek(to: max(0, min(currentTime + delta, duration > 0 ? duration : .greatestFiniteMagnitude)))
     }
@@ -509,6 +536,12 @@ struct ContentView: View {
     // Swap moves pane A/B between the physical left/right (or top/bottom)
     // screens in book posture — as an animated offset, never a rebuild.
     @State private var swapped = false
+    // Book-posture hinge strip in pane-container coordinates, nil when flat.
+    // nil until PostureProbe's first poll resolves it (or on non-Duo devices).
+    @State private var foldStrip: FoldStrip? = nil
+    // Apollo's deliberately dumb "changing" flag: set around the multi-step
+    // geometry move; every other posture-driven path bails while it's up.
+    @State private var panesMoving = false
 
     // The Duo's size classes are identical in both orientations on the inner
     // display, so the only honest left/right-vs-top/bottom rule is geometry.
@@ -524,16 +557,29 @@ struct ContentView: View {
                     let rects = paneRects(
                         width: Double(paneGeo.size.width),
                         height: Double(paneGeo.size.height),
-                        spacing: 6
-                        // fold: pass a FoldStrip once the book-posture
-                        // division-region mechanism is wired (pending).
+                        spacing: 6,
+                        fold: foldStrip
                     )
                     ZStack(alignment: .topLeading) {
                         pane(a, label: "A", rect: swapped ? rects.1 : rects.0)
                         pane(b, label: "B", rect: swapped ? rects.0 : rects.1)
                     }
+                    // PostureProbe sits in the same coordinate space as the
+                    // panes, so its division frame maps straight to FoldStrip.
+                    .background(PostureProbe { strip in
+                        // Resume rule from the field notes: re-anchor only
+                        // once geometry settles, not mid-transition.
+                        foldStrip = strip
+                    })
                     .animation(.snappy(duration: 0.35), value: swapped)
                     .animation(.snappy(duration: 0.35), value: paneAxis(width: Double(paneGeo.size.width), height: Double(paneGeo.size.height)))
+                    .animation(.snappy(duration: 0.35), value: foldStrip)
+                    .onChange(of: paneAxis(width: Double(paneGeo.size.width), height: Double(paneGeo.size.height))) { _ in
+                        postureChanged()   // fold/flat or rotate: move layers between settles
+                    }
+                    .onChange(of: foldStrip) { _ in
+                        postureChanged()   // hinge strip appeared/moved/vanished
+                    }
                 }
 
                 controls
@@ -544,6 +590,23 @@ struct ContentView: View {
         .background(Color.black)
         .preferredColorScheme(.dark)
         .onAppear { Audio.configure() }
+    }
+
+    /// Pause layers -> let the panes re-anchor -> resume after settle.
+    /// The delay absorbs UIKit's late division-region publication (~1.5 s
+    /// after the hinge, per Apollo; our probe re-fires postureChanged then,
+    /// and the changing flag keeps the moves serialized). Resume itself is
+    /// identity-revalidated, not a blind play().
+    private func postureChanged() {
+        guard !panesMoving else { return }
+        panesMoving = true
+        let sa = a.snapshotForMove()
+        let sb = b.snapshotForMove()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            a.resumeAfterMove(sa)
+            b.resumeAfterMove(sb)
+            panesMoving = false
+        }
     }
 
     private func pane(_ model: PlayerModel, label: String, rect: PaneRect) -> some View {
@@ -591,7 +654,7 @@ struct ContentView: View {
                         .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
                 }
                 .buttonStyle(.plain)
-                .help("Swap panes across the screens")
+                .help("Swap panes across the screens (book posture: locks A/B to physical left/right)")
             }
             .buttonBorderShape(.roundedRectangle)
 
