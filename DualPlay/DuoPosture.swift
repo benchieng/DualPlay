@@ -67,7 +67,9 @@ final class PostureUIView: UIView {
                 ?? (region.value(forKey: "active") as? Bool) ?? false
             guard active else { continue }
             guard let frame = (region.value(forKey: "frame") as? NSValue)?.cgRectValue,
-                  frame.isFinite, !frame.isNull,
+                  !frame.isNull,
+                  frame.origin.x.isFinite, frame.origin.y.isFinite,
+                  frame.width.isFinite, frame.height.isFinite,
                   frame.width > 0, frame.height > 0
             else { continue }
             return view.convert(frame, from: window)   // window coords -> ours
