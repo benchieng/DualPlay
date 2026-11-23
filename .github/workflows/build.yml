@@ -17,6 +17,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Layout logic is pure Swift (no UIKit): compile and assert it right on
+      # the runner, no simulator — the Apollo-Reborn host-test pattern.
+      - name: Host-test layout logic
+        run: |
+          set -euo pipefail
+          swiftc -O DualPlay/LayoutLogic.swift Tools/HostTests/main.swift -o build-hosttests
+          ./build-hosttests
+
       # Pin the exact Xcode: "newest installed" drifts silently when the
       # runner image updates, changing the toolchain under a green build.
       - name: Select pinned Xcode

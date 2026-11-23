@@ -45,6 +45,14 @@ picker runs out-of-process.
    blend them with the per-pane volume sliders. Each clip loops.
 3. **Restart Both** re-syncs them to 0:00.
 4. Unfold the Duo (or rotate to landscape) for a proper side-by-side.
+5. **⇄** swaps the panes, so you can put video A on the physical left screen
+   and B on the right (book posture). Swapping and rotating/moving the Duo
+   animate pane positions — playback and browser pages are not interrupted
+   (panes keep their identity across layout flips).
+
+The split-line geometry lives in `DualPlay/LayoutLogic.swift` as pure
+functions (no UIKit), asserted on every CI run by `Tools/HostTests/` under
+plain `swiftc` — no simulator needed.
 
 ## Notes
 
@@ -95,5 +103,9 @@ Lessons from production Duo code that apply to any two-pane Duo app:
 |---|---|---|---|---|
 | iPhone Duo | 27.2 | latest-ci | real | dual AVPlayer mix confirmed; per-pane browser OK; blob-capture probe pending |
 | iPhone (compact) | 27.2 | latest-ci | real | stacked layout OK |
+| iPhone Duo | 27.2 | latest-ci (post-layout-rework) | real | **PENDING human test:** rotate/fold while both videos play — audio must not hitch, browser panes must not reload; ⇄ swaps panes; scrub still tracks |
+
+The pending row is the field-notes rule in action: layout changes that touch
+media transitions are only "working" once a person ran them on the hardware.
 
 Fill a row for every media/gesture change before calling it working.

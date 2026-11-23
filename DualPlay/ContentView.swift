@@ -127,6 +127,10 @@ struct PlayerLayerView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: PlayerUIView, context: Context) {
+        // Re-pointing is cheap and idempotent; assigning here lets a pane's
+        // frame change without ever rebuilding the layer (and lets the swap
+        // button animate offsets instead of re-creating players).
+        uiView.playerLayer.player = player
         uiView.playerLayer.videoGravity = fill ? .resizeAspectFill : .resizeAspect
     }
 }
@@ -502,17 +506,34 @@ struct ContentView: View {
     @StateObject private var b = PlayerModel()
 
     @State private var playing = false
+    // Swap moves pane A/B between the physical left/right (or top/bottom)
+    // screens in book posture — as an animated offset, never a rebuild.
+    @State private var swapped = false
 
     // The Duo's size classes are identical in both orientations on the inner
-    // display, so the only honest left/right-vs-top/bottom rule is geometry:
-    // landscape container -> side-by-side, portrait -> stacked.
+    // display, so the only honest left/right-vs-top/bottom rule is geometry.
+    // Both panes live in ONE ZStack and are positioned by paneRects(): the
+    // old if-landscape-HStack-else-VStack switched container types and
+    // destroyed both AVPlayerLayers and both WKWebViews on every fold or
+    // rotation (page reloads, audio hitches). Stable identity across the
+    // flip = a continuous move, per the Duo field notes.
     var body: some View {
         GeometryReader { geo in
             VStack(spacing: 8) {
-                if geo.size.width > geo.size.height {
-                    HStack(spacing: 6) { panes }
-                } else {
-                    VStack(spacing: 6) { panes }
+                GeometryReader { paneGeo in
+                    let rects = paneRects(
+                        width: Double(paneGeo.size.width),
+                        height: Double(paneGeo.size.height),
+                        spacing: 6
+                        // fold: pass a FoldStrip once the book-posture
+                        // division-region mechanism is wired (pending).
+                    )
+                    ZStack(alignment: .topLeading) {
+                        pane(a, label: "A", rect: swapped ? rects.1 : rects.0)
+                        pane(b, label: "B", rect: swapped ? rects.0 : rects.1)
+                    }
+                    .animation(.snappy(duration: 0.35), value: swapped)
+                    .animation(.snappy(duration: 0.35), value: paneAxis(width: Double(paneGeo.size.width), height: Double(paneGeo.size.height)))
                 }
 
                 controls
@@ -525,10 +546,10 @@ struct ContentView: View {
         .onAppear { Audio.configure() }
     }
 
-    @ViewBuilder
-    private var panes: some View {
-        PaneView(model: a, label: "A") { playing = true }
-        PaneView(model: b, label: "B") { playing = true }
+    private func pane(_ model: PlayerModel, label: String, rect: PaneRect) -> some View {
+        PaneView(model: model, label: label) { playing = true }
+            .frame(width: CGFloat(rect.width), height: CGFloat(rect.height))
+            .offset(x: CGFloat(rect.x), y: CGFloat(rect.y))
     }
 
     // MARK: Shared controls
@@ -560,10 +581,21 @@ struct ContentView: View {
                 }
                 .buttonStyle(.bordered)
                 .disabled(!a.hasVideo || !b.hasVideo)
+
+                Button {
+                    swapped.toggle()
+                } label: {
+                    Image(systemName: "arrow.left.arrow.right")
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 6)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+                .help("Swap panes across the screens")
             }
             .buttonBorderShape(.roundedRectangle)
 
-            Text("Each pane: globe = browse the web in that pane; ▶ in web mode captures the page's video. −15/+15, scrub, fit/fill per pane; clips loop.")
+            Text("Each pane: globe = browse the web in that pane; ▶ in web mode captures the page's video. ⇄ swaps panes across the screens. −15/+15, scrub, fit/fill per pane; clips loop.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
